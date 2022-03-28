@@ -103,7 +103,7 @@ practice_data = patient_data[
 #+ include = F
 ## Set up ----
 set.seed(0)
-samp_share = 1
+samp_share = 0.1
 init_sample = sample(nrow(patient_data), round(samp_share*nrow(patient_data)))
 
 y_min = patient_data[, min(Y)]; y_range = patient_data[, max(Y) - min(Y)]
@@ -116,6 +116,8 @@ cleaned_data = copy(patient_data)[
     if(is.character(x)) x = as.factor(x)
     x
   })
+  ][
+  init_sample
   ]
 x_init = cleaned_data[
   # init_sample
@@ -128,7 +130,7 @@ z_init = cleaned_data[
   , Z
   ]
 y_init = cleaned_data[
-  #init_sample
+  # init_sample
   , Y_transform
   ]
 
@@ -152,6 +154,7 @@ init_out = mc.wbart(x.train = data.frame(x_init), y.train = y_init
                  , nskip = 100, ndpost = 250
                  , keepevery = 5
                  , mc.cores = 8)
+save(init_out, file = "models/init_pred.RData", compress = F)
 t_elap = Sys.time() - t1
 print(t_elap)
 #' Note that estimation can take a long time. Even with sample of 
@@ -161,20 +164,16 @@ print(t_elap)
 #' .
 
 ## Estimate Outcomes
-init_ests = data.table(
-  est_val = init_out$yhat.train.mean
-  , id.practice = cleaned_data$id.practice
-  , treat_flag = cleaned_data$Z
-  , z_post = cleaned_data$z_post
-  , year = cleaned_data$year
-  , act_y = cleaned_data$Y_transform)
-init_ests[## Add untreated coutnerfactural. 
+init_ests = cleaned_data[
+  , .(id.practice, Z, z_post, year, Y_transform
+      , X1, X2, X3, X4, X5
+      , est_val = init_out$yhat.train.mean)
+  ][
   , est_untr := est_val
   ][
   z_post==1
   , est_untr:=init_out$yhat.test.mean
   ]
-
 
 ## Run convergence analysis
 data.table(init_out$sigma) %>% 
@@ -206,55 +205,75 @@ treat_prob = data.table(treat = treat_y
            , prob = treat_out$prob.train.mean
            , id.practice = treatment_data$id.practice
            )
-treat_prob[
-  , `:=`(H_1 = 1/prob
-         , H_0 = 1/(1-prob)
-         , H_A = treat/prob - (1-treat)/(1-prob))
-]
-
 ## Run convergence analysis 
 treat_prob  %>% 
   ggplot()+
-  geom_density(aes(x = prob, color = factor(true)))
+  geom_density(aes(x = prob, color = factor(treat)))
 
+
+## Update Estimates ----
+### Figure out how to implement this...
+update_data = init_ests %>% 
+  merge(treat_prob
+        , by.x = c("id.practice", "Z")
+        , by.y = c("id.practice", "treat")) %>% 
+  .[
+    , .(gn = prob, qn1 = est_val, qn0 = est_untr
+        , Y_transform, Z, z_post)
+    ]
+update_data[
+  , `:=`(hyn = 1/(sum(Z)/.N) - gn/((1-gn) * sum(Z)/.N)
+         , hgn = (qn1 - qn0 - sum(gn * (qn1-qn0)/(sum(Z)/.N))/.N))
+]
+
+tol = 1/update_data[, .N]
+hyn_score = update_data[, sum(hyn*(Y_transform - qn]
+while()
+gn = fluct_data$prob
+qn = fluct_data$est_val
+clev_y_n = fluct
 
 ## Fluctuation Param ----
 
-fluct_data = init_ests %>% 
-  merge(treat_prob, by.x = c("id.practice", "Z"), by.y = c("id.practice", "treat_y"))
+treat_prob[
+  , `:=`(H_1 = 1/(sum(treat_y)/.N)
+         , H_0 = -1/(1-prob)
+         , H_A = treat/prob - (1-treat)/(1-prob))
+]
 
-glm_fit <- glm(act_y ~ -1 + offset(qlogis(est_val)) + H_A, data=fluct_data, family=binomial)
+
+glm_fit <- glm(Y_transform ~ -1 + offset(qlogis(est_val)) + H_A, data=fluct_data, family=binomial)
 
 eps = coef(glm_fit)
 
 fluct_data[, eps:=eps]
 
-## Update Estimates ----
+## Final estimates ----
 
 final_est = fluct_data[
-  , `:=`(update_val = plogis(qlogis(est_val)) + eps*clev
-         , update_untr = plogis(qlogis(est_untr)) + eps*H_0
+  , `:=`(update_val = plogis(qlogis(est_val)) + eps*H_A
+         , update_untr = plogis(qlogis(est_untr)) + eps*H_0)
+  ][
+  , `:=`(val_rescale = update_val*y_range + y_min
+         , untr_rescale = update_untr*y_range + y_min)
   ]
 
 satt = fluct_data[
   z_post==1
-  , mean(update_)
+  , .(overall = mean(val_rescale - untr_rescale, na.rm = T)
+      , year_3 = mean(val_rescale[year==3] - untr_rescale[year==3], na.rm = T)
+      , year_4 = mean(val_rescale[year==4] - untr_rescale[year==4], na.rm = T))
 ]
-
-
-##################)
-# BART + Conformal ----
-##################)
-
-
-
-## BART mean, 5, 95 quantile Estimates on Training ----
-
-
-
-## Q value from test data ----
-
-
-## Confidence Interval from adjusting quantile with X weighted output ----
-
-
+for(v in "X"%p%1:5){
+  vals = sort(unique(fluct_data[, get(v)]))
+  for(val in vals){
+    cat("\n", v%p%"_"%p%val)
+    set(x = satt, i = 1L, j = v%p%"_"%p%val
+        , value = (
+          fluct_data[
+            z_post==1 & get(v)==val
+            , mean(val_rescale - untr_rescale, na.rm = T)
+          ]))
+  }
+}
+satt
