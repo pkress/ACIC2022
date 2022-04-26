@@ -45,7 +45,7 @@ read_files = function(folder, nos){
 }
 dataset.nums = 3101:3102
 
-data = "data/track1c_20220404/"%p%c("patient", "patient_year", "practice", "practice_year") %>%
+data = "ACICdata/track1c_20220404/"%p%c("patient", "patient_year", "practice", "practice_year") %>%
   setNames(.,c("patient", "patient_year", "practice", "practice_year")) %>%
   lapply(.,read_files, nos = dataset.nums)
 
@@ -347,5 +347,5 @@ overalls = lapply(all_out, `[[`, "overall") %>%
   rbindlist()
 practices = lapply(all_out, `[[`, "practice") %>% 
   rbindlist()
-fwrite(overalls, "data/output_overall_"%p%paste(range(dataset.nums), collapse = "_")%p%".csv")
-fwrite(practices, "data/output_practices_"%p%paste(range(dataset.nums), collapse = "_")%p%".csv")
+fwrite(overalls, "ACICdata/output_overall_"%p%paste(range(dataset.nums), collapse = "_")%p%".csv")
+fwrite(practices, "ACICdata/output_practices_"%p%paste(range(dataset.nums), collapse = "_")%p%".csv")
