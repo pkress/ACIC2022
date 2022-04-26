@@ -10,7 +10,7 @@
 
 #+ include = F
 ## Paths ----
-setwd("/Users/pkress/Documents/Personal Projects/ACIC/")
+setwd("/home/pkress/")
 
 ## Packages ----
 
