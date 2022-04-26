@@ -33,4 +33,4 @@ module load R/4.0/4.0.2
 #---------------------------------------------------------------------------------
 # Commands to execute below...
 
-srun Rscript  1.2_estimation_methods.R
+srun Rscript  1.1_estimation.R
