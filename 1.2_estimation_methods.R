@@ -43,7 +43,7 @@ read_files = function(folder, nos){
     lapply(., fread) %>% 
     rbindlist(idcol = "samp")
 }
-dataset.nums = 3101:3102
+dataset.nums = 2406:2407
 
 data = "ACICdata/track1c_20220404/"%p%c("patient", "patient_year", "practice", "practice_year") %>%
   setNames(.,c("patient", "patient_year", "practice", "practice_year")) %>%
@@ -171,7 +171,7 @@ all_out = lapply(dataset.nums, \(dsetnum){
   init_out = mc.wbart(x.train = data.frame(x_init), y.train = y_init
                    , nskip = nskip, ndpost = ndpost
                    , keepevery = 5
-                   , mc.cores = 8, seed = 0)
+                   , mc.cores = ncores, seed = 0)
   # save(init_out, file = "models/init_pred.RData", compress = F)
   pred_untr = predict(init_out, bartModelMatrix(data.frame(x_init_all_untr)))
   pred_tr = predict(init_out, bartModelMatrix(data.frame(x_init_all_tr)))
@@ -227,7 +227,8 @@ all_out = lapply(dataset.nums, \(dsetnum){
   ncores = parallel::detectCores()
   nskip = 100; ndpost = 200
   treat_out = mc.lbart(x.train = data.frame(treat_x), y.train = treat_y
-                      , nskip = nskip, ndpost = 200
+                      , keepevery = 5
+                       , nskip = nskip, ndpost = 200
                       , mc.cores = ncores)
   
   ## Estimate Outcomes
