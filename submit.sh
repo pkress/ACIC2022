@@ -3,7 +3,7 @@
 #---------------------------------------------------------------------------------
 # Account information
 
-#SBATCH --account=staff              # basic (default), staff, phd, faculty
+#SBATCH --account=pi-scottn+              # basic (default), staff, phd, faculty
 
 #---------------------------------------------------------------------------------
 # Resources requested
