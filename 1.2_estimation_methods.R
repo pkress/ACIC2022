@@ -17,7 +17,7 @@ setwd("/home/pkress/")
 if(!require("pacman")) install.packages("pacman")
 library(pacman)
 p_load(data.table, magrittr, stringr, ggplot2
-       , fixest, MatchIt, BART, tmle, SuperLearner)
+       , fixest, BART, parallel)
 
 ## Handy Functions ----
 `%p%` = paste0
@@ -37,12 +37,15 @@ make_title = function(x){ str_to_title(gsub("_", " ", x))}
 
 ## Read in data
 read_files = function(folder, nos){
-  lapply(list.files(folder, full.names = T, pattern = paste(nos%p%".csv",collapse = "|")), fread) %>% 
+  list.files(folder, full.names = T
+             , pattern = paste(nos%p%".csv",collapse = "|")) %>% 
+    setNames(.,nos) %>% 
+    lapply(., fread) %>% 
     rbindlist(idcol = "samp")
 }
-dataset.nums = 1:2
+dataset.nums = 3101:3102
 
-data = "data/track1a_20220404/"%p%c("patient", "patient_year", "practice", "practice_year") %>%
+data = "data/track1c_20220404/"%p%c("patient", "patient_year", "practice", "practice_year") %>%
   setNames(.,c("patient", "patient_year", "practice", "practice_year")) %>%
   lapply(.,read_files, nos = dataset.nums)
 
@@ -104,12 +107,15 @@ practice_data = patient_data[
 #' 
 #+ include = F
 ## Set up ----
-set.seed(0)
-samp_share = 0.1
-init_sample = sample(nrow(patient_data), round(samp_share*nrow(patient_data)))
 
-y_min = patient_data[, min(Y)]; y_range = patient_data[, max(Y) - min(Y)]
-lapply(dataset.nums, \(dsetnum){
+all_out = lapply(dataset.nums, \(dsetnum){
+  y_min = patient_data[samp==dsetnum, min(Y)]
+  y_range = patient_data[samp==dsetnum, max(Y) - min(Y)]
+  
+  set.seed(0)
+  # samp_share = 1
+  # init_sample = patient_data[samp==dsetnum, sample(.N, round(samp_share*.N))]
+  init_sample = patient_data[samp==dsetnum, 1:.N]
   
   cleaned_data = copy(patient_data)[
     samp==dsetnum
@@ -159,13 +165,14 @@ lapply(dataset.nums, \(dsetnum){
   ]
   ## Initial Response Estimates ----
   ## Run estimation
-  nskip = 100; ndpost = 250
+  ncores = parallel::detectCores()
+  nskip = 200; ndpost = 200
   t1 = Sys.time()
   init_out = mc.wbart(x.train = data.frame(x_init), y.train = y_init
                    , nskip = nskip, ndpost = ndpost
                    , keepevery = 5
-                   , mc.cores = 8)
-  save(init_out, file = "models/init_pred.RData", compress = F)
+                   , mc.cores = 8, seed = 0)
+  # save(init_out, file = "models/init_pred.RData", compress = F)
   pred_untr = predict(init_out, bartModelMatrix(data.frame(x_init_all_untr)))
   pred_tr = predict(init_out, bartModelMatrix(data.frame(x_init_all_tr)))
   t_elap = Sys.time() - t1
@@ -196,11 +203,11 @@ lapply(dataset.nums, \(dsetnum){
     ]
   
   ## Run convergence analysis
-  data.table(init_out$sigma) %>% 
-    .[, id:=1:.N] %>% 
-    melt.data.table(id.vars = "id") %>% 
-    ggplot()+
-    geom_line(aes(x = id, y = value, color = variable))
+  # data.table(init_out$sigma) %>% 
+  #   .[, id:=1:.N] %>% 
+  #   melt.data.table(id.vars = "id") %>% 
+  #   ggplot()+
+  #   geom_line(aes(x = id, y = value, color = variable))
   
   
   ## Model Treatment ----
@@ -216,9 +223,12 @@ lapply(dataset.nums, \(dsetnum){
     ]
   treat_y = treatment_data[, Z]
   
+  
+  ncores = parallel::detectCores()
+  nskip = 100; ndpost = 200
   treat_out = mc.lbart(x.train = data.frame(treat_x), y.train = treat_y
-                      , nskip = 50, ndpost = 200
-                      , mc.cores = 8)
+                      , nskip = nskip, ndpost = 200
+                      , mc.cores = ncores)
   
   ## Estimate Outcomes
   treat_prob = data.table(treat = treat_y
@@ -226,10 +236,10 @@ lapply(dataset.nums, \(dsetnum){
              , id.practice = treatment_data$id.practice
              )
   ## Run convergence analysis 
-  treat_prob  %>% 
-    ggplot()+
-    geom_density(aes(x = prob, color = factor(treat)))
-  
+  # treat_prob  %>% 
+  #   ggplot()+
+  #   geom_density(aes(x = prob, color = factor(treat)))
+  # 
   
   ## Update Estimates ----
   ### Figure out how to implement this...
@@ -238,7 +248,7 @@ lapply(dataset.nums, \(dsetnum){
           , by.x = c("id.practice", "Z")
           , by.y = c("id.practice", "treat")) %>% 
     .[
-      , .(samp, year, X1, X2, X3, X4, X5
+      , .(samp, id.practice, year, X1, X2, X3, X4, X5
           , gn = prob
           , qn = fifelse(est_val<=0.00001, 0.00001, est_val)
           , qn1 = fifelse(est_tr<=0.00001, 0.00001, est_tr)
@@ -278,6 +288,26 @@ lapply(dataset.nums, \(dsetnum){
   cat("Solved for parameters in ", k, " iterations!")
   
   ## Generate final estimates
+  calc_out = function(filter_text){
+    out = update_data[
+      eval(parse(text = filter_text))
+    ][
+      , att := 1/.N * sum(gn/(sum(Z)/.N) * (qn1 - qn0))
+    ][
+      , .(dataset.num = first(samp)
+          , att = first(att)
+          , sd_dn = sd(hyn*(Y_transform - qn) + hgn*(Z - gn)
+                       + gn/(sum(Z)/.N) * (qn1 - qn0 - att)))
+    ][
+      ,  `:=`(att = att*y_range + y_min
+              , sd_dn = sd_dn*y_range)
+    ][
+      , .(dataset.num
+          , satt = att
+          , lower90 = att - 1.645*sd_dn
+          , upper90 = att + 1.645*sd_dn)
+    ]
+  }
   ## Generate filters for each subgroup of interest
   subgroups = lapply("X"%p%1:5, \(v){
     vals = sort(unique(update_data[, get(v)]))
@@ -291,37 +321,31 @@ lapply(dataset.nums, \(dsetnum){
     setNames(.,c(c("all", "y3", "y4"), names(subgroups)))
   
   ## For each subgroup, calculate the satt and 90% confints
-  outests = lapply(scens, \(x){
-    out = update_data[
-      eval(parse(text = x))
-    ][
-      , att := 1/.N * sum(gn/(sum(Z)/.N) * (qn1 - qn0))
-    ][
-      , .(dataset.num = first(samp)
-          , att = first(att)
-          , sd_dn = sd(hyn*(Y_transform - qn) + hgn*(Z - gn)
-                       + gn/(sum(Z)/.N) * (qn1 - qn0 - att)))
-    ][
-      ,  `:=`(att = att*y_range + y_min
-             , sd_dn = sd_dn*y_range)
-    ][
-      , .(dataset.num
-          , satt = att
-          , lower90 = att - 1.645*sd_dn
-          , upper90 = att + 1.645*sd_dn)
-    ]
-  }) %>% 
+  outests = lapply(scens, calc_out) %>% 
     rbindlist(idcol = "scen")
   
   outcln = outests[
     , .(dataset.num
-        , variable = fifelse(scen%in%c("overall", "y3", "y4"), "Overall"
+        , variable = fifelse(scen%in%c("all", "y3", "y4"), "Overall"
                              , str_extract(scen, "X[1-5]"))
-        , level = fifelse(scen%in%c("overall", "y3", "y4"), "NA"
+        , level = fifelse(scen%in%c("all", "y3", "y4"), "NA"
                           , gsub("_", "", str_extract(scen, "_[ABC01]")))
         , year = fifelse(scen%in%c("y3", "y4"), str_extract(scen, "[34]$"), "NA")
         , satt, lower90, upper90)
   ]
+  
+  prac_scens = "z_post==1&id.practice=="%p%update_data[, unique(id.practice)] %>% 
+    setNames(.,update_data[, unique(id.practice)])
+  outprac = lapply(prac_scens, calc_out) %>% 
+    rbindlist(idcol = "id.practice") %>% 
+    setcolorder(c("dataset.num", "id.practice", "satt", "lower90", "upper90"))
+  
   outcln
-}) %>% 
+  return(list(overall = outcln, practice = outprac))
+})
+overalls = lapply(all_out, `[[`, "overall") %>% 
   rbindlist()
+practices = lapply(all_out, `[[`, "practice") %>% 
+  rbindlist()
+fwrite(overalls, "data/output_overall_"%p%paste(range(dataset.nums), collapse = "_")%p%".csv")
+fwrite(practices, "data/output_practices_"%p%paste(range(dataset.nums), collapse = "_")%p%".csv")
