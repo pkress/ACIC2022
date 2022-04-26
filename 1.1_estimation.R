@@ -8,7 +8,6 @@
 # Initialize Workspace ----
 ##################-
 
-#+ include = F
 ## Paths ----
 setwd("/home/pkress/")
 
@@ -158,13 +157,6 @@ all_out = lapply(dataset.nums, \(dsetnum){
   pred_tr = predict(init_out, bartModelMatrix(data.frame(x_init_all_tr)))
   t_elap = Sys.time() - t1
   print(t_elap)
-  #' Note that estimation can take a long time. Even with sample of 
-  {{samp_share}}
-  #', the estimation with 
-  {{ ndpost }}
-  #' post-burn chains took 
-  {{ t_elap}}
-  #' .
   
   ## Estimate Outcomes
   init_ests = cleaned_data[## Take variables of importance and estimated outputs
