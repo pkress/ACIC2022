@@ -40,7 +40,7 @@ read_files = function(folder, nos){
     lapply(., fread) %>% 
     rbindlist(idcol = "samp")
 }
-dataset.nums = 2406:2407
+dataset.nums = 2406:2406
 
 data = "ACICdata/track1c_20220404/"%p%c("patient", "patient_year", "practice", "practice_year") %>%
   setNames(.,c("patient", "patient_year", "practice", "practice_year")) %>%
@@ -153,8 +153,8 @@ all_out = lapply(dataset.nums, \(dsetnum){
                    , keepevery = 5
                    , mc.cores = ncores, seed = 0)
   # save(init_out, file = "models/init_pred.RData", compress = F)
-  pred_untr = predict(init_out, bartModelMatrix(data.frame(x_init_all_untr)))
-  pred_tr = predict(init_out, bartModelMatrix(data.frame(x_init_all_tr)))
+  pred_untr = predict(init_out, bartModelMatrix(data.frame(x_init_all_untr)), mc.cores = ncores)
+  pred_tr = predict(init_out, bartModelMatrix(data.frame(x_init_all_tr)), mc.cores = ncores)
   t_elap = Sys.time() - t1
   print(t_elap)
   
@@ -176,12 +176,11 @@ all_out = lapply(dataset.nums, \(dsetnum){
     ]
   
   ## Run convergence analysis
-  # data.table(init_out$sigma) %>% 
-  #   .[, id:=1:.N] %>% 
-  #   melt.data.table(id.vars = "id") %>% 
-  #   ggplot()+
-  #   geom_line(aes(x = id, y = value, color = variable))
-  
+  data.table(init_out$sigma) %>%
+    .[, id:=1:.N] %>%
+    melt.data.table(id.vars = "id") %>%
+    ggplot()+
+    geom_line(aes(x = id, y = value, color = variable))
   
   ## Model Treatment Probability ----
   
@@ -226,18 +225,23 @@ all_out = lapply(dataset.nums, \(dsetnum){
   ### qn0: estimated untreated counterfactual outcome
   
   ## We treat bottom code estimates to 0.00001 to avoid NaNs
+  bound_func = function(x, delt = 0.0000001){
+    fcase(x<delt, delt, x>1-delt, 1-delt, rep(T, length(x)), x)
+    }
+  
   update_data = init_ests %>% 
     merge(treat_prob
           , by.x = c("id.practice", "Z")
           , by.y = c("id.practice", "treat")) %>% 
     .[
       , .(samp, id.practice, year, X1, X2, X3, X4, X5
-          , gn = prob
-          , qn = fifelse(est_val<=0.00001, 0.00001, est_val)
-          , qn1 = fifelse(est_tr<=0.00001, 0.00001, est_tr)
-          , qn0 = fifelse(est_untr<=0.00001,0.00001,est_untr)
+          , gn = bound_func(prob)
+          , qn = bound_func(est_val)
+          , qn1 = bound_func(est_tr)
+          , qn0 = bound_func(est_untr)
           , Y_transform, Z, z_post)
       ]
+  
   
   ## Create initial values for "clever covariates"
   ### hyn: clever covariate for Y
@@ -246,59 +250,63 @@ all_out = lapply(dataset.nums, \(dsetnum){
     , `:=`(hyn = as.numeric(Z==1)/(sum(Z)/.N) - as.numeric(Z==0)*gn/((1-gn) * sum(Z)/.N)
            , hgn = (qn1 - qn0 - sum(gn * (qn1-qn0)/(sum(Z)/.N))/.N)/(sum(Z)/.N))
   ]
-  
-  ## Iteratively target the ATT (heuristic is 1/N, we choose 1/(100N))
-  tol = 1/update_data[, 100*.N]
-  diff = Inf
-  k = 0
-  while(!all(abs(diff)<tol)){
-    ## For each iteration, update the estimate for gn using the hgn clever covar
-    k = k +1
-    cat("\nIter: ", k)
-    g_fit = glm(Z ~ -1 + offset(qlogis(gn)) + hgn, data=update_data, family=binomial)
-    update_data[, gn := plogis(qlogis(gn) + g_fit$coefficients * hgn)]
-    ## Update the estimate for hyn clever covar, and update qn estimates using 
-    ## the updated value
-    update_data[
-      , hyn:=as.numeric(Z==1)/(sum(Z)/.N)-as.numeric(Z==0)*gn/((1-gn) * sum(Z)/.N)
-    ]
-    q_fit = glm(Y_transform ~ -1 + offset(qlogis(qn)) + hyn, data=update_data, family=binomial)
-    update_data[
-      , `:=`(qn1 = plogis(qlogis(qn1) + q_fit$coefficients*hyn)
-             , qn0 = plogis(qlogis(qn0) + q_fit$coefficients*hyn)
-             , qn = plogis(qlogis(qn) + q_fit$coefficients*hyn))
-      ]
-    ## Update hgn clever covar with the updated qn estimates
-    update_data[
-      , hgn:=qn1 - qn0 - sum(gn * (qn1-qn0)/(sum(Z)/.N))/.N
-    ]
-    ## Repeat until covar adjusted total differences for Y and Z are small
-    diff = c(hyn = update_data[, 1/.N * sum(hyn*(Y_transform - qn))]
-             , hgn = update_data[, 1/.N * sum(hgn*(Z - gn))])
-    print(max(abs(diff)))
-  }
-  cat("Solved for parameters in ", k, " iterations!")
-  
+  save_data = copy(update_data)
   ## Generate final estimates
   calc_out = function(filter_text){
-    out = update_data[## limit to the subsample of interest
+    update_data = copy(save_data)[## limit to the subsample of interest
       eval(parse(text = filter_text))
-    ][## Calculate the satt estimate
-      , att := 1/.N * sum(gn/(sum(Z)/.N) * (qn1 - qn0))
-    ][## Calculate the SD of the influence function for inference
-      , .(dataset.num = first(samp)
-          , att = first(att)
-          , sd_dn = sd(hyn*(Y_transform - qn) + hgn*(Z - gn)
-                       + gn/(sum(Z)/.N) * (qn1 - qn0 - att)))
-    ][## Rescale to original bounds
-      ,  `:=`(att = att*y_range + y_min
-              , sd_dn = sd_dn*y_range)
-    ][## Return final outputs
-      , .(dataset.num
-          , satt = att
-          , lower90 = att - 1.645*sd_dn
-          , upper90 = att + 1.645*sd_dn)
     ]
+  ## Iteratively target the ATT (heuristic is 1/N, we choose 1/(100N))
+    tol = 1/update_data[, 100*.N]
+    diff = Inf
+    k = 0
+    while(!all(abs(diff)<tol)&k<100){
+      ## For each iteration, update the estimate for gn using the hgn clever covar
+      k = k +1
+      cat("\nIter: ", k)
+      g_fit = glm(Z ~ -1 + offset(qlogis(gn)) + hgn, data=update_data, family=binomial)
+      update_data[
+        , gn := bound_func(plogis(qlogis(gn) + g_fit$coefficients * hgn))
+        ]
+      ## Update the estimate for hyn clever covar, and update qn estimates using 
+      ## the updated value
+      update_data[
+        , hyn:=as.numeric(Z==1)/(sum(Z)/.N)-as.numeric(Z==0)*gn/((1-gn) * sum(Z)/.N)
+      ]
+      q_fit = glm(Y_transform ~ -1 + offset(qlogis(qn)) + hyn, data=update_data, family=binomial)
+      update_data[
+        , `:=`(qn1 = bound_func(plogis(qlogis(qn1) + q_fit$coefficients*hyn))
+               , qn0 = bound_func(plogis(qlogis(qn0) + q_fit$coefficients*hyn))
+               , qn = bound_func(plogis(qlogis(qn) + q_fit$coefficients*hyn)))
+        ]
+      ## Update hgn clever covar with the updated qn estimates
+      update_data[
+        , hgn:=qn1 - qn0 - sum(gn * (qn1-qn0)/(sum(Z)/.N), na.rm = T)/.N
+      ]
+      ## Repeat until covar adjusted total differences for Y and Z are small
+      diff = c(hyn = update_data[, 1/.N * sum(hyn*(Y_transform - qn))]
+               , hgn = update_data[, 1/.N * sum(hgn*(Z - gn))])
+      print(max(abs(diff)))
+      if(k>100) cat("\nBreaking because of iteration max")
+    }
+    cat("Solved for parameters in ", k, " iterations!")
+    
+      out = update_data[## Calculate the satt estimate
+        , att := 1/.N * sum(gn/(sum(Z)/.N) * (qn1 - qn0))
+      ][## Calculate the SD of the influence function for inference
+        , .(dataset.num = first(samp)
+            , att = first(att)
+            , sd_dn = sd(hyn*(Y_transform - qn) + hgn*(Z - gn)
+                         + gn/(sum(Z)/.N) * (qn1 - qn0 - att))/sqrt(.N))
+      ][## Rescale to original bounds
+        ,  `:=`(att = att*y_range + y_min
+                , sd_dn = sd_dn*y_range)
+      ][## Return final outputs
+        , .(dataset.num
+            , satt = att
+            , lower90 = att - 1.645*sd_dn
+            , upper90 = att + 1.645*sd_dn)
+      ]
   }
   
   ## Generate filters for each subgroup of interest
@@ -315,8 +323,8 @@ all_out = lapply(dataset.nums, \(dsetnum){
     setNames(.,c(c("all", "y3", "y4"), names(subgroups)))
   
   ### Also create scenarios for each practice
-  prac_scens = "z_post==1&id.practice=="%p%update_data[, unique(id.practice)] %>% 
-    setNames(.,update_data[, unique(id.practice)])
+  prac_scens = "z_post==1&id.practice=="%p%update_data[z_post==1, unique(id.practice)] %>% 
+    setNames(.,update_data[z_post==1, unique(id.practice)])
   
   ## Estimate overall outcomes
   outests = lapply(scens, calc_out) %>% 
