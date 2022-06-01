@@ -9,7 +9,8 @@
 ##################-
 
 ## Paths ----
-setwd("/home/pkress/")
+# setwd(dirname(rstudioapi::getActiveDocumentContext()[['path']]))
+# setwd("/home/pkress/")
 
 ## Packages ----
 
@@ -40,7 +41,7 @@ read_files = function(folder, nos){
     lapply(., fread) %>% 
     rbindlist(idcol = "samp")
 }
-dataset.nums = 2406:2406
+dataset.nums = 2407:2407
 
 data = "ACICdata/track1c_20220404/"%p%c("patient", "patient_year", "practice", "practice_year") %>%
   setNames(.,c("patient", "patient_year", "practice", "practice_year")) %>%
